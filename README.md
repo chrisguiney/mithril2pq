@@ -24,7 +24,7 @@ One Dockerfile builds two images:
 
 ```sh
 docker build --target mithril2pq -t mithril2pq .     # the static binary alone
-docker build -t mithril2pq-notebook .                # JupyterLab, DuckDB and notebooks/explore.ipynb
+docker build -t mithril2pq-notebook .                # JupyterLab, DuckDB, plotting libraries, notebooks/explore.ipynb
 
 docker run --rm --user "$(id -u):$(id -g)" -v /data/mithril:/data \
   mithril2pq -mithril-archive preview -out /data/preview -cache-dir /data/cache/preview
@@ -35,7 +35,8 @@ docker run -d -p 127.0.0.1:8888:8888 -e JUPYTER_TOKEN=... \
 
 The notebook exposes every table as a DuckDB view over its Parquet files, with
 `tables.<name>`, `load(...)` and `sql(...)` returning pandas DataFrames
-(hashes as hex strings by default). `MITHRIL2PQ_DATA` sets the data directory
+(hashes as hex strings by default). matplotlib, seaborn, plotly, altair and
+bokeh are installed. `MITHRIL2PQ_DATA` sets the data directory
 (default `/data`) and `DUCKDB_MEMORY_LIMIT` caps DuckDB's memory (default
 `16GB`).
 
