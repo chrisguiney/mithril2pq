@@ -1,0 +1,45 @@
+module github.com/chrisguiney/mithril2pq
+
+go 1.26.10
+
+require (
+	github.com/apache/arrow-go/v18 v18.8.0
+	github.com/blinklabs-io/gouroboros v0.218.2
+	github.com/blinklabs-io/plutigo v0.11.6
+	github.com/klauspost/compress v1.20.4
+	golang.org/x/crypto v0.59.0
+	golang.org/x/term v0.48.0
+)
+
+require (
+	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/andybalholm/brotli v1.2.3 // indirect
+	github.com/apache/thrift v0.24.0 // indirect
+	github.com/bits-and-blooms/bitset v1.25.0 // indirect
+	github.com/btcsuite/btcd/btcec/v2 v2.5.1 // indirect
+	github.com/btcsuite/btcd/btcutil v1.2.0 // indirect
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect
+	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/consensys/gnark-crypto v0.22.0 // indirect
+	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
+	github.com/fxamacker/cbor/v2 v2.10.0 // indirect
+	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/google/flatbuffers v25.12.19+incompatible // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/jinzhu/copier v0.4.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.29 // indirect
+	github.com/utxorpc/go-codegen v0.19.2 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
+	github.com/zeebo/xxh3 v1.1.0 // indirect
+	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
+)
