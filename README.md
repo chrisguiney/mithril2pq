@@ -25,7 +25,7 @@ txs = ds.dataset("preview-pq/tx").to_table()
 | `-out` | (required) | output directory |
 | `-mithril-archive` | `mainnet` | `mainnet`, `preprod`, `preview`, or an aggregator URL |
 | `-snapshot` | latest | snapshot hash to convert |
-| `-cache-dir` | none | keep downloaded archives here, still compressed, and reuse them |
+| `-cache-dir` | none | keep downloaded archives here, still compressed, and reuse them; one directory per network |
 | `-file-size` | `128MB` | target Parquet file size: `300MB`, `3GB`, `512MiB`, ... (KB/MB/GB are decimal, KiB/MiB/GiB binary) |
 | `-concurrency` | 25 | concurrent downloads |
 | `-buffer` | 2 × concurrency | without a cache, how many downloaded archives may wait in memory for the writer |

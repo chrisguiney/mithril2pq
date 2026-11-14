@@ -56,7 +56,7 @@ type runner struct {
 	prog     *progress
 	mem      memory.Allocator
 
-	cacheImm  string // cache directory for this network's archives, "" for none
+	cacheImm  string // cache directory, "" for none
 	cacheLock *os.File
 }
 
@@ -185,7 +185,7 @@ func (r *runner) openCache() error {
 	if r.cfg.cacheDir == "" {
 		return nil
 	}
-	dir := filepath.Join(r.cfg.cacheDir, r.network, "immutable")
+	dir := r.cfg.cacheDir
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating cache directory: %w", err)
 	}
@@ -198,17 +198,39 @@ func (r *runner) openCache() error {
 		return fmt.Errorf("cache directory %s is in use by another mithril2pq process", dir)
 	}
 	r.cacheImm, r.cacheLock = dir, lock
+	// Archives are named by immutable file number, which every network
+	// reuses, so one cache directory holds one network's archives.
+	marker := filepath.Join(dir, cacheNetworkFile)
+	if b, err := os.ReadFile(marker); err == nil {
+		if have := strings.TrimSpace(string(b)); have != r.network {
+			return fmt.Errorf("cache directory %s holds %s archives; use a separate -cache-dir for %s", dir, have, r.network)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(marker, []byte(r.network+"\n"), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", marker, err)
+		}
+	} else {
+		return fmt.Errorf("reading %s: %w", marker, err)
+	}
 	// With the lock held, any partial download is a leftover.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".partial") {
+		if isPartial(e.Name()) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 	return nil
+}
+
+// cacheNetworkFile records which network a cache directory's archives are
+// from.
+const cacheNetworkFile = ".mithril2pq-network"
+
+func isPartial(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".tar.zst.partial-")
 }
 
 func (r *runner) closeCache() {
@@ -228,14 +250,10 @@ func removeCachePartials(cacheDir string) {
 		return
 	}
 	suffix := fmt.Sprintf(".partial-%d", os.Getpid())
-	nets, _ := os.ReadDir(cacheDir)
-	for _, n := range nets {
-		dir := filepath.Join(cacheDir, n.Name(), "immutable")
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), suffix) {
-				os.Remove(filepath.Join(dir, e.Name()))
-			}
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		if isPartial(e.Name()) && strings.HasSuffix(e.Name(), suffix) {
+			os.Remove(filepath.Join(cacheDir, e.Name()))
 		}
 	}
 }
