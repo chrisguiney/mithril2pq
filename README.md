@@ -160,7 +160,8 @@ transaction. Parquet has no constraints, so the keys below are conventions.
 | `param_update`, `param_update_cost_model` | | pre-Conway update proposals and Conway parameter changes, one column per parameter |
 | `proposal`, `proposal_withdrawal`, `proposal_committee_add`, `proposal_committee_remove` | `tx_hash, proposal_index` | governance actions |
 | `vote` | `tx_hash, voter, action` | votes |
-| `vkey_witness`, `bootstrap_witness`, `plutus_datum_witness`, `redeemer` | | witnesses |
+| `vkey_witness` | `tx_hash, position` | key witnesses; a Byron extended key is split into `vkey` and `chain_code` (null for Shelley-era keys and Byron redeem witnesses) |
+| `bootstrap_witness`, `plutus_datum_witness`, `redeemer` | | witnesses |
 | `plutus_data_node` | owner, `node_id` | inline datums, witness datums and redeemer data, one row per node |
 | `metadata_node` | `tx_hash, label, node_id` | transaction metadata, one row per node |
 

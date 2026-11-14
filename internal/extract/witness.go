@@ -25,7 +25,8 @@ func witnesses(b *builder, txh []byte, w lcommon.TransactionWitnessSet) {
 		return
 	}
 	for i, v := range w.Vkey() {
-		b.add(schema.VkeyWitness, txh, uint64(i), v.Vkey, v.Signature)
+		vkey, chainCode := splitVkey(v.Vkey)
+		b.add(schema.VkeyWitness, txh, uint64(i), vkey, optHash(chainCode), v.Signature)
 	}
 	for i, bw := range w.Bootstrap() {
 		b.add(schema.BootstrapWitness, txh, uint64(i), bw.PublicKey, bw.Signature, bw.ChainCode, bw.Attributes)
@@ -47,6 +48,16 @@ func witnesses(b *builder, txh []byte, w lcommon.TransactionWitnessSet) {
 			pos++
 		}
 	}
+}
+
+// splitVkey separates a Byron extended public key (64 bytes: Ed25519 key,
+// then chain code) into its parts. Any other key is returned as is, with
+// no chain code, for the row check to accept or reject.
+func splitVkey(k []byte) (vkey, chainCode []byte) {
+	if len(k) == 64 {
+		return k[:32], k[32:]
+	}
+	return k, nil
 }
 
 func txScripts(b *builder, txh []byte, source string, native []lcommon.NativeScript,

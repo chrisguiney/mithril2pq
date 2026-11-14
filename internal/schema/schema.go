@@ -20,7 +20,7 @@ import (
 // Version is recorded in every file and in the manifest. Bump it whenever a
 // table or column changes; a dataset written with another version is not
 // appended to.
-const Version = 1
+const Version = 2
 
 // Column is one flat column.
 type Column struct {
@@ -449,6 +449,10 @@ var (
 		req("tx_hash", tHash32),
 		req("position", tU32),
 		req("vkey", tHash32),
+		// Byron VKWitness keys are extended (CC.xpub): the Ed25519 key in
+		// vkey and this chain code. Null for Shelley-era keys and Byron
+		// redeem witnesses.
+		opt("chain_code", tHash32),
 		req("signature", tBytes64),
 	)
 
