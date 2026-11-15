@@ -100,6 +100,13 @@ func ReadGenesisKey(arg string) (GenesisKey, error) {
 	return ParseGenesisKey(arg)
 }
 
+// VerifyEd25519Strict reports whether sig is a valid Ed25519 signature of
+// msg under key by ed25519-dalek's verify_strict rules, which Mithril applies
+// to genesis signatures.
+func VerifyEd25519Strict(key, msg, sig []byte) bool {
+	return verifyStrict(GenesisKey(key), msg, sig)
+}
+
 func isSmallOrder(p *edwards25519.Point) bool {
 	return new(edwards25519.Point).MultByCofactor(p).Equal(edwards25519.NewIdentityPoint()) == 1
 }
