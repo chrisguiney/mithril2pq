@@ -34,6 +34,8 @@ Contents:
 - [Output layout](#output-layout)
 - [Parquet schema](#parquet-schema)
 - [Exploring the data](#exploring-the-data)
+- [Benchmarks](#benchmarks)
+- [Attribution](#attribution)
 
 ## Building
 
@@ -911,6 +913,82 @@ creates a DuckDB view per table over its Parquet files and provides:
 `DUCKDB_MEMORY_LIMIT` DuckDB's memory limit (default `16GB`); keep the
 container's memory limit comfortably above it.
 
+## Benchmarks
+
+`internal/mithril/stm` ports mithril-stm's benchmarks (`benches/stm.rs`,
+`benches/multi_sig.rs`, `benches/size_benches.rs`) to Go with the same
+parameters and the same ChaCha20-seeded keys, stakes and messages:
+
+```sh
+go test ./internal/mithril/stm -run '^$' -bench . -benchtime 3s
+MITHRIL2PQ_BENCH_FULL=1 go test ./internal/mithril/stm -run '^$' -bench STMBatchVerification -timeout 2h
+```
+
+`-short` skips the 2000- and 3000-party setups. The 2000-party batch
+verification needs about 260,000 signers to sign and play 1523 lotteries
+each, so it runs only with `MITHRIL2PQ_BENCH_FULL=1`. The `snark` benches
+(`schnorr_sig.rs`, `halo2_*.rs`) are not ported: they exercise Mithril's
+SNARK prover (Jubjub Schnorr, Poseidon, Halo2), which release builds do not
+compile and which no public aggregator uses.
+
+Measured on an 11th Gen Intel Core i9-11900 (8 cores, 16 threads), Go 1.26
+against Rust 1.100 (`rust:1-slim-bookworm`, release profile) at Mithril
+2642.0, time per operation:
+
+| Benchmark | Rust | Go |
+|---|---|---|
+| STM 300 parties (k=25, m=150): key registration | 389 ms | 412 ms |
+| STM 300: play all lotteries | 1.64 ms | 1.31 ms |
+| STM 300: aggregation | 20.4 ms | 22.3 ms |
+| STM 2000 parties (k=250, m=1523): key registration | 2.58 s | 2.68 s |
+| STM 2000: play all lotteries | 17.8 ms | 13.9 ms |
+| STM 2000: aggregation | 205 ms | 224 ms |
+| STM batch verification, 300 parties, batch 1 | 2.07 ms | 1.78 ms |
+| ... batch 10 | 15.4 ms | 13.3 ms |
+| ... batch 20 | 30.6 ms | 25.9 ms |
+| ... batch 100 | 152 ms | 121 ms |
+| BLS batch verification of 300-signature aggregates, "batch 1" | 0.58 ms | 0.72 ms |
+| ... "batch 10" (11 aggregates) | 1.13 ms | 2.76 ms |
+| ... "batch 20" (31) | 1.66 ms | 6.96 ms |
+| ... "batch 50" (81) | 3.06 ms | 17.4 ms |
+| ... "batch 100" (181) | 6.26 ms | 38.4 ms |
+| BLS: 1000 signatures | 119 ms | 117 ms |
+| BLS: 1000 verifications | 621 ms | 751 ms |
+| BLS: 1000-signature aggregate and verify | 5.48 ms | 5.54 ms |
+| Mainnet certificate multi-signature (48 signers, k=1944) | | 24.9 ms |
+
+Proof sizes (`size_benches.rs`, bytes of `AggregateSignature::to_bytes` for
+3000 parties) are identical: 668,068 and 771,879 bytes with Mithril's
+BLAKE2b-256 tree for (k=445, m=2728) and (k=554, m=3597), 725,751 and
+831,478 bytes with BLAKE2b-512.
+
+Notes on the comparison:
+
+- `multi_sig.rs` does not reset its vectors between batch sizes, so batch
+  "B" verifies 1, 11, 31, 81 and 181 aggregates; the Go port keeps that.
+  blst verifies those multi-pairings on a thread pool, gnark-crypto on one
+  thread, which accounts for the gap.
+- At 2642.0, `stm.rs` panics: the first 300-party signer wins none of its
+  lotteries and the benchmark unwraps the error (the Go port reproduces the
+  same keys and the same loss). The Rust numbers above come from a copy of
+  the bench that ignores that error, without the 2000-party batch set.
+  `multi_sig.rs` also does not compile with `benchmark-internals` alone at
+  2642.0; one `cfg` line in `mithril-stm/src/lib.rs` was changed to build it.
+  Neither change touches measured code.
+- Rust's BLS verification also re-checks the signature's subgroup
+  membership; Go checks it once, when a signature is decoded.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE).
+
+## Attribution
+
+The certificate verification under `internal/mithril/stm` and
+`internal/mithril/chain` is derived from
+[Mithril](https://github.com/IntersectMBO/mithril), Copyright 2022 Input
+Output (Hong Kong) Ltd., licensed under the Apache License 2.0: it is a Go
+port of mithril-stm 0.13.0 and parts of mithril-common 0.8.3 at Mithril
+release 2642.0 (commit e85df3ddc52b528c7b9ddbdddf1941fec6d5f348). Each
+ported file names the Rust source it comes from; test vectors copied from
+Mithril cite their source file. See [NOTICE](NOTICE).
