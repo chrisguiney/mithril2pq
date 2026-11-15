@@ -117,6 +117,7 @@ mithril2pq -out DIR [options]
 | `-checkpoint DURATION` | `30m` | Commit progress (finish the open files and update the manifest) at least this often, e.g. `10m`, `2h`. `0` commits only at the end. An interrupted run resumes from the last commit. |
 | `-compression CODEC` | `zstd` | Parquet compression: `zstd`, `snappy`, `gzip` or `none`. All are readable by pyarrow, fastparquet and DuckDB. |
 | `-last-chunk N` | snapshot's last | Stop after immutable file `N`. Converts a prefix of the chain, e.g. `-last-chunk 207` for mainnet's Byron era; a later run without it continues from there. |
+| `-genesis-vkey KEY\|FILE` | pinned | Mithril genesis verification key the certificate chain must end at, as a key or a file holding one (Mithril's `genesis.vkey` JSON-hex format, or 64 hex digits). Required with an aggregator URL; overrides the built-in key of `mainnet`, `preprod` and `preview`. See [Verification](#verification). |
 
 How the pipeline runs: archives are downloaded concurrently and run ahead of
 decoding and writing. Decoding is parallel (`-workers`); tables are written in
@@ -190,8 +191,49 @@ For each snapshot, before converting anything:
 - the certificate is for this snapshot (same beacon) and its protocol message
   carries the snapshot's Merkle root;
 - the certificate's signed message is the hash of its protocol message;
+- the certificate chain verifies back to a genesis certificate, as
+  `mithril-client` verifies it (see below);
 - the snapshot's digest list (SHA-256 of every immutable file) hashes to the
   certified Merkle root.
+
+Certificate chain, for every certificate from the snapshot's back to genesis:
+
+- its hash matches its content, and its signed message its protocol message;
+- its STM multi-signature (Mithril's concatenation proof) verifies: every
+  claimed lottery index is in range and won for the signer's stake, no index
+  is claimed twice, at least `k` indexes are claimed, every signer is in the
+  aggregate verification key's Merkle tree, and the aggregated BLS12-381
+  signature verifies over the signed message;
+- its epoch matches its protocol message, it is at most one epoch from the
+  previous certificate, and the previous certificate's hash is its
+  `previous_hash`;
+- its aggregate verification key and protocol parameters are the ones the
+  previous certificate signed for the next epoch (or equal the previous
+  certificate's, within an epoch);
+- the genesis certificate's Ed25519 signature verifies under the network's
+  genesis verification key, with ed25519-dalek's `verify_strict` rules.
+
+The genesis keys of mainnet, preprod and preview are built into mithril2pq,
+copied from Mithril's `mithril-infra/configuration`; they are not fetched. With
+an aggregator URL, pass the operator's key with `-genesis-vkey` (a key or a
+file, in Mithril's `genesis.vkey` format or as 64 hex digits); a run without
+it refuses to start.
+
+The port follows Mithril release 2642.0, plus three checks Mithril added on
+its main branch since: a lottery index must be below `m` (2642.0 accepts `m`
+itself), the genesis certificate's aggregate verification key and parameters
+must be the ones its signed message names, and the certificate after genesis
+must be in the next epoch. Honest aggregators never produce what these
+reject. Certificates using Mithril's experimental SNARK proofs are rejected
+as unsupported; no public aggregator issues them.
+
+A walk on mainnet checks about 130 certificates (some 110 KB each) and takes
+about 20 seconds. The hashes of verified certificates are recorded, per
+genesis key, in `_mithril2pq_verified_certificates.json` in the output
+directory; a later run stops its walk at the first recorded certificate,
+after checking that its content still matches its hash. A hash is recorded
+only from a walk that reached genesis or a recorded certificate. Delete the
+file to force a full walk.
 
 For each immutable file:
 
@@ -203,11 +245,6 @@ For each immutable file:
 - each chunk's first block's previous hash against the last block written.
 
 A corrupt cached archive is downloaded again once before the run fails.
-
-**Not verified:** the certificate's STM multi-signature and the certificate
-chain back to the genesis certificate. That needs BLS12-381 and Mithril's STM
-scheme, which have no Go implementation. Use `mithril-client` when the data
-must be authenticated against the Mithril signers.
 
 ## Output layout
 

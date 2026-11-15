@@ -24,6 +24,7 @@ import (
 
 	"github.com/chrisguiney/mithril2pq/internal/dataset"
 	"github.com/chrisguiney/mithril2pq/internal/mithril"
+	"github.com/chrisguiney/mithril2pq/internal/mithril/chain"
 )
 
 func main() {
@@ -44,6 +45,7 @@ func realMain() int {
 	flag.DurationVar(&cfg.checkpoint, "checkpoint", 30*time.Minute, "commit progress at least this often (`duration`; 0 commits only at the end)")
 	flag.StringVar(&cfg.compression, "compression", "zstd", "Parquet `codec`: zstd, snappy, gzip or none")
 	flag.Int64Var(&cfg.lastChunk, "last-chunk", -1, "stop after this immutable file `number` (default: the snapshot's last)")
+	flag.StringVar(&cfg.genesisKeyArg, "genesis-vkey", "", "Mithril genesis verification `key or file` (genesis.vkey format or 64 hex digits); required with an aggregator URL, overrides the pinned key of mainnet, preprod and preview")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s -out DIR [flags]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Convert a Mithril Cardano database snapshot into Parquet tables, or bring\nan existing output directory up to date.\n\n")
@@ -123,8 +125,19 @@ func validate(cfg *config) error {
 	if _, ok := dataset.Compressions[cfg.compression]; !ok {
 		return fmt.Errorf("-compression %q is not one of zstd, snappy, gzip, none", cfg.compression)
 	}
-	if _, _, err := mithril.ResolveAggregator(cfg.archive); err != nil {
+	_, network, err := mithril.ResolveAggregator(cfg.archive)
+	if err != nil {
 		return err
+	}
+	switch {
+	case cfg.genesisKeyArg != "":
+		if cfg.genesisKey, err = chain.ReadGenesisKey(cfg.genesisKeyArg); err != nil {
+			return fmt.Errorf("-genesis-vkey: %w", err)
+		}
+	case network != "":
+		cfg.genesisKey, _ = chain.NetworkGenesisKey(network)
+	default:
+		return fmt.Errorf("-genesis-vkey is required with an aggregator URL: certificates are verified back to a genesis certificate, and mithril2pq pins genesis keys only for mainnet, preprod and preview. Use the genesis.vkey file the aggregator's operator publishes")
 	}
 	return nil
 }
@@ -162,6 +175,8 @@ func explain(err error) string {
 		return msg + "\n  (permission denied; check -out and -cache-dir)"
 	case errors.Is(err, context.DeadlineExceeded):
 		return msg + "\n  (timed out; rerun to continue)"
+	case strings.Contains(msg, "certificate chain verification failed"):
+		return msg + "\n  (the snapshot's certificate does not chain back to a genesis certificate signed by the genesis key; do not use this snapshot. With an aggregator URL, check -genesis-vkey)"
 	case strings.Contains(msg, "verification failed"):
 		return msg + "\n  (the aggregator's data does not match what its certificate signs; do not use this snapshot)"
 	}

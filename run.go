@@ -24,6 +24,7 @@ import (
 	"github.com/chrisguiney/mithril2pq/internal/dataset"
 	"github.com/chrisguiney/mithril2pq/internal/extract"
 	"github.com/chrisguiney/mithril2pq/internal/mithril"
+	"github.com/chrisguiney/mithril2pq/internal/mithril/chain"
 	"github.com/chrisguiney/mithril2pq/internal/schema"
 )
 
@@ -39,6 +40,9 @@ type config struct {
 	checkpoint  time.Duration
 	compression string
 	lastChunk   int64 // -1: the snapshot's last immutable file
+
+	genesisKeyArg string           // -genesis-vkey as given
+	genesisKey    chain.GenesisKey // resolved by validate
 }
 
 // errStopped reports a clean stop on request; progress up to it is
@@ -128,6 +132,9 @@ func (r *runner) loadSnapshot(ctx context.Context, presetNet string) error {
 	if err := mithril.VerifyCertificate(a, cert); err != nil {
 		return fmt.Errorf("snapshot verification failed: %w", err)
 	}
+	if err := r.verifyChain(ctx, cert); err != nil {
+		return err
+	}
 
 	list, err := r.client.Digests(ctx, a)
 	if err != nil {
@@ -144,8 +151,7 @@ func (r *runner) loadSnapshot(ctx context.Context, presetNet string) error {
 	for _, d := range list {
 		r.digests[d.ImmutableFileName] = d.Digest
 	}
-	r.prog.logf("verified: %d file digests hash to the certified Merkle root, and the certificate's signed message commits to it", len(list))
-	r.prog.logf("not verified: the certificate's STM multi-signature and its chain to genesis")
+	r.prog.logf("verified: %d file digests hash to the certified Merkle root, which the certificate's signed message commits to", len(list))
 	return nil
 }
 

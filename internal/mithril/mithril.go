@@ -1,20 +1,16 @@
 // Package mithril reads Cardano database snapshots from a Mithril
-// aggregator and verifies what can be verified without the Mithril STM
-// signature scheme:
+// aggregator and verifies them:
 //
 //   - each immutable file's SHA-256 against the snapshot's digest list;
 //   - the digest list's Merkle root against the artifact and against the
 //     certificate's signed protocol message;
-//   - the certificate's signed message against its protocol message parts.
-//
-// The certificate's multi-signature and its chain back to genesis are not
-// verified: that needs BLS12-381 and Mithril's STM scheme.
+//   - the certificate's signed message against its protocol message parts;
+//   - the certificate's STM multi-signature and its chain back to a genesis
+//     certificate signed by a pinned genesis key (package chain).
 package mithril
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +19,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/chrisguiney/mithril2pq/internal/mithril/chain"
 )
 
 // Networks maps the well-known network names to their aggregators.
@@ -108,18 +106,8 @@ type Artifact struct {
 	CreatedAt               string `json:"created_at"`
 }
 
-// Certificate is the subset of a Mithril certificate that is checked.
-type Certificate struct {
-	Hash             string          `json:"hash"`
-	PreviousHash     string          `json:"previous_hash"`
-	Epoch            uint64          `json:"epoch"`
-	SignedEntityType json.RawMessage `json:"signed_entity_type"`
-	ProtocolMessage  struct {
-		MessageParts map[string]string `json:"message_parts"`
-		HashScheme   string            `json:"hash_scheme"`
-	} `json:"protocol_message"`
-	SignedMessage string `json:"signed_message"`
-}
+// Certificate is a Mithril certificate as the aggregator serves it.
+type Certificate = chain.Certificate
 
 // LatestArtifact returns the most recent snapshot.
 func (c *Client) LatestArtifact(ctx context.Context) (ArtifactSummary, error) {
@@ -141,10 +129,12 @@ func (c *Client) Artifact(ctx context.Context, hash string) (Artifact, error) {
 }
 
 // Certificate returns the certificate with the given hash.
-func (c *Client) Certificate(ctx context.Context, hash string) (Certificate, error) {
+func (c *Client) Certificate(ctx context.Context, hash string) (*Certificate, error) {
 	var cert Certificate
-	err := c.getJSON(ctx, c.Aggregator+"/certificate/"+url.PathEscape(hash), &cert)
-	return cert, err
+	if err := c.getJSON(ctx, c.Aggregator+"/certificate/"+url.PathEscape(hash), &cert); err != nil {
+		return nil, err
+	}
+	return &cert, nil
 }
 
 func (c *Client) getJSON(ctx context.Context, u string, v any) error {
@@ -226,48 +216,16 @@ func retry(ctx context.Context, attempts int, f func() error) error {
 	return err
 }
 
-// protocolMessagePartOrder is the declaration order of mithril-common's
-// ProtocolMessagePartKey. The legacy message hash walks a BTreeMap keyed by
-// that enum, so parts are hashed in this order, not alphabetically.
-var protocolMessagePartOrder = []string{
-	"snapshot_digest",
-	"cardano_transactions_merkle_root",
-	"cardano_blocks_transactions_merkle_root",
-	"next_aggregate_verification_key",
-	"next_protocol_parameters",
-	"current_epoch",
-	"latest_block_number",
-	"cardano_blocks_transactions_block_number_offset",
-	"cardano_stake_distribution_epoch",
-	"cardano_stake_distribution_merkle_root",
-	"cardano_database_merkle_root",
-	"next_aggregate_verification_key_snark",
-}
-
-// ProtocolMessageHash computes the legacy-scheme hash of the message parts:
-// SHA-256 over key then value for each part, in enum order.
+// ProtocolMessageHash computes the legacy-scheme hash of protocol message
+// parts.
 func ProtocolMessageHash(parts map[string]string) (string, error) {
-	known := map[string]bool{}
-	h := sha256.New()
-	for _, k := range protocolMessagePartOrder {
-		known[k] = true
-		if v, ok := parts[k]; ok {
-			h.Write([]byte(k))
-			h.Write([]byte(v))
-		}
-	}
-	for k := range parts {
-		if !known[k] {
-			return "", fmt.Errorf("protocol message has part %q that this version of mithril2pq does not know how to hash", k)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return chain.ProtocolMessageHash(parts)
 }
 
 // VerifyCertificate checks that the certificate is for this artifact and
-// that its signed message commits to the artifact's Merkle root. It does
-// not verify the multi-signature.
-func VerifyCertificate(a Artifact, cert Certificate) error {
+// that its signed message commits to the artifact's Merkle root. The
+// certificate's own signature and chain are checked by chain.Verify.
+func VerifyCertificate(a Artifact, cert *Certificate) error {
 	if cert.Hash != a.CertificateHash {
 		return fmt.Errorf("aggregator returned certificate %s for %s", cert.Hash, a.CertificateHash)
 	}
@@ -284,10 +242,7 @@ func VerifyCertificate(a Artifact, cert Certificate) error {
 	if root := cert.ProtocolMessage.MessageParts["cardano_database_merkle_root"]; root != a.MerkleRoot {
 		return fmt.Errorf("certificate signs Merkle root %q, the snapshot's is %s", root, a.MerkleRoot)
 	}
-	if s := cert.ProtocolMessage.HashScheme; s != "" && s != "legacy" {
-		return fmt.Errorf("certificate uses protocol message hash scheme %q, which this version of mithril2pq cannot check", s)
-	}
-	got, err := ProtocolMessageHash(cert.ProtocolMessage.MessageParts)
+	got, err := cert.ProtocolMessage.Hash()
 	if err != nil {
 		return err
 	}
