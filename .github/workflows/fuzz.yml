@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Differential fuzzing against Mithril's Rust crates (fuzz/oracle). New
+# divergences fail the job and are uploaded as artifacts: classify each one
+# (fix the Go port, or record an accepted divergence) before committing it.
+name: Differential fuzz
+
+on:
+  schedule:
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Fuzzing budget per target (go test -fuzztime)
+        default: 5m
+
+permissions:
+  contents: read
+
+env:
+  FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/mithril2pq-oracle/cargo-home
+            ~/.cache/mithril2pq-oracle/target
+            ~/.cache/mithril2pq-oracle/dl
+          key: oracle-${{ hashFiles('fuzz/oracle/Cargo.lock', 'fuzz/oracle/Cargo.toml', 'fuzz/oracle/oracle-internals.patch', 'fuzz/oracle/src/**', 'fuzz/oracle/build.sh') }}
+          restore-keys: oracle-
+      - name: Build the oracle
+        run: ORACLE_BUILD=docker fuzz/oracle/build.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oracle
+          path: ~/.cache/mithril2pq-oracle/target/release/mithril-oracle
+          retention-days: 3
+
+  corpus:
+    needs: oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: oracle
+          path: oracle
+      # The recorded corpus must still be what Rust answers today.
+      - name: Regenerate the recorded corpus
+        env:
+          MITHRIL2PQ_DIFF_REGEN: "1"
+        run: |
+          chmod +x oracle/mithril-oracle
+          MITHRIL2PQ_ORACLE="$PWD/oracle/mithril-oracle" go test ./internal/mithril/difftest -run TestRegenerateCorpus -count=1 -v
+          git diff --exit-code internal/mithril/difftest/testdata
+
+  fuzz:
+    needs: oracle
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - stm/FuzzSigDecode
+          - stm/FuzzVKDecode
+          - stm/FuzzAVKJSON
+          - stm/FuzzProofJSON
+          - stm/FuzzParseF64
+          - stm/FuzzLn1m
+          - stm/FuzzLottery
+          - stm/FuzzDenseMapping
+          - stm/FuzzBatchPath
+          - stm/FuzzProofVerify
+          - stm/FuzzAggregate
+          - stm/FuzzGen
+          - chain/FuzzParamsHash
+          - chain/FuzzTimestamp
+          - chain/FuzzCertHash
+          - chain/FuzzCertVerify
+          - chain/FuzzEd25519
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: oracle
+          path: oracle
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          chmod +x oracle/mithril-oracle
+          pkg=${TARGET%/*}
+          fn=${TARGET#*/}
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+          echo "FN=$fn" >> "$GITHUB_ENV"
+          MITHRIL2PQ_ORACLE="$PWD/oracle/mithril-oracle" go test "./internal/mithril/$pkg" \
+            -run '^$' -fuzz "^$fn\$" -fuzztime "$FUZZTIME" -fuzzminimizetime 30s
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crashers-${{ env.FN }}
+          path: internal/mithril/${{ env.PKG }}/testdata/fuzz/${{ env.FN }}
