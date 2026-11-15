@@ -227,7 +227,10 @@ itself), the genesis certificate's aggregate verification key and parameters
 must be the ones its signed message names, and the certificate after genesis
 must be in the next epoch. Honest aggregators never produce what these
 reject. Certificates using Mithril's experimental SNARK proofs are rejected
-as unsupported; no public aggregator issues them.
+as unsupported; no public aggregator issues them. Certificate messages are
+read as `mithril-client` reads them, not as Go's `encoding/json` would:
+keys match exactly, a repeated field or a missing or null required field is
+an error, and timestamps follow chrono's relaxed RFC 3339 grammar.
 
 A walk on mainnet checks about 130 certificates (some 110 KB each) and takes
 about 20 seconds. The hashes of verified certificates are recorded, per
@@ -978,6 +981,88 @@ Notes on the comparison:
 - Rust's BLS verification also re-checks the signature's subgroup
   membership; Go checks it once, when a signature is decoded.
 
+## Differential fuzzing
+
+The Go port is compared with Mithril's own Rust crates (mithril-stm 0.13.0
+and mithril-common 0.8.3, release 2642.0) by differential tests in
+`internal/mithril/difftest`. A small Rust program, the oracle in
+[`fuzz/oracle`](fuzz/oracle/README.md), answers the same questions as the
+Go code, one JSON line per question, and the tests fail when the answers
+differ in a way no documented rule explains. The oracle is test tooling
+only; the `mithril2pq` binary does not contain or run it.
+
+Plain `go test ./...` needs no Rust: it replays the recorded answers in
+`internal/mithril/difftest/testdata/diff` (about 800 cases, 300 KB of JSON
+lines) and runs every fuzz target's seed corpus against the Go side alone,
+skipping the comparison with a message saying so.
+
+To fuzz against Rust, build the oracle (Docker is enough; no Rust toolchain
+is needed) and point `MITHRIL2PQ_ORACLE` at it:
+
+```sh
+export MITHRIL2PQ_ORACLE=$(fuzz/oracle/build.sh | tail -1)
+go test ./internal/mithril/stm -run '^$' -fuzz '^FuzzProofVerify$' -fuzztime 5m
+```
+
+`MITHRIL2PQ_ORACLE` may also be a command line, such as a `docker run -i`
+of an image holding the binary. The targets, ranked roughly by how often
+they find something:
+
+| Package | Targets | Compares |
+|---|---|---|
+| `stm` | `FuzzSigDecode`, `FuzzVKDecode` | BLS point decoding, from generated encodings of every class (valid, outside the subgroup, x ≥ p, infinity with stray bits, uncompressed, wrong length) |
+| `stm` | `FuzzAVKJSON`, `FuzzProofJSON` | the JSON codec, under token-level mutation (key case, repeated and missing keys, number spellings, nulls) |
+| `stm` | `FuzzParseF64`, `FuzzLn1m`, `FuzzLottery`, `FuzzDenseMapping` | phi_f parsing, ln(1 - phi_f), the lottery near its threshold and at edge values |
+| `stm` | `FuzzBatchPath`, `FuzzProofVerify` | Merkle batch paths and full proof verification, with structure-aware mutations (signatures swapped, negated or corrupted, indexes at m and m + 1, stakes and total stake, path values and indices, leaf count, message, parameters) |
+| `stm` | `FuzzAggregate`, `FuzzGen` | BLS aggregation, and seeded key generation, signing and aggregation |
+| `chain` | `FuzzParamsHash`, `FuzzTimestamp`, `FuzzCertHash` | parameter, metadata, protocol message and certificate hashes, including U8F24 ties and timestamp spellings |
+| `chain` | `FuzzCertVerify` | the chain rules, on a synthetic chain whose certificates are re-signed and re-hashed after each edit so every rule is reachable |
+| `chain` | `FuzzEd25519` | `verify_strict`: small-order R and keys, non-canonical encodings, S ≥ L |
+
+To refresh the recorded answers after changing a generator or moving to a
+new Mithril release (rebuild the oracle first), run
+`MITHRIL2PQ_DIFF_REGEN=1 go test ./internal/mithril/difftest -run TestRegenerateCorpus`
+with `MITHRIL2PQ_ORACLE` set, and review the diff. Regeneration fails on any
+difference no rule explains.
+
+The nightly `Differential fuzz` workflow builds the oracle, checks the
+recorded answers are still current, and fuzzes each target for five minutes,
+uploading any failing input.
+
+Differences that are accepted, each a named rule in `difftest` that a
+recorded case pins:
+
+- `libm-ln`: Rust takes ln(1 - phi_f) from the platform's libm, Go from its
+  own `math.Log`; they differ in the last bit for about 7% of values in
+  (0, 1), none of them a value any network uses. `nan-bits` is the NaN of a
+  negative argument, whose bits are not meaningful.
+- `serde-float-rounding`: serde_json, built as Mithril builds it (without
+  `float_roundtrip`), rounds some long decimals one or two units in the
+  last place away from the correctly rounded value Go reads. Network
+  parameters have three digits.
+- `rust-prefix-decode`: Rust decodes the first 48 (96) bytes of a longer
+  signature (key) byte string; Go requires the exact length. JSON carries
+  fixed-length arrays, so this is not reachable from a certificate.
+- `index-bound-main`: release 2642.0 accepts lottery index m; the port, like
+  Mithril's main branch, requires index < m. `main:GenesisAVKMismatch`,
+  `main:GenesisParamsMismatch` and `main:EpochAfterGenesis` are the other
+  checks the port takes from Mithril's main branch (see Verification).
+- `u8f24-out-of-range`, `rust-panics-go-rejects`: a phi_f outside 8.24
+  fixed point wraps in release builds of Mithril (and panics on NaN or in
+  debug builds); the port rejects it.
+- `go-rejects-snark-fields`: certificates with SNARK-era fields are
+  rejected, where the release's default build ignores the fields.
+- `go-no-bytes-hex`: Mithril falls back to its binary encoding when a key
+  or multi-signature is not JSON-hex; the port reads JSON-hex only, which
+  is what aggregators emit.
+- `merkle-error-class`: Rust names an index overflow in a batch path
+  `SerializationError`; Go has one error for every invalid path.
+
+Proofs that claim a stake far above the total stake (or use a tiny phi_f)
+make the lottery's Taylor series cost seconds per claimed index on both
+sides, before the Merkle check rejects them; the fuzz targets skip such
+inputs.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE).
@@ -991,4 +1076,9 @@ Output (Hong Kong) Ltd., licensed under the Apache License 2.0: it is a Go
 port of mithril-stm 0.13.0 and parts of mithril-common 0.8.3 at Mithril
 release 2642.0 (commit e85df3ddc52b528c7b9ddbdddf1941fec6d5f348). Each
 ported file names the Rust source it comes from; test vectors copied from
-Mithril cite their source file. See [NOTICE](NOTICE).
+Mithril cite their source file. The certificate timestamp parser is a port
+of [chrono](https://github.com/chronotope/chrono) 0.4.45's relaxed RFC 3339
+reader (Apache License 2.0 or MIT). The differential-fuzzing oracle builds
+the unmodified crates.io mithril-stm 0.13.0 with an additive patch,
+`fuzz/oracle/oracle-internals.patch`, exposing crate-private functions to
+it. See [NOTICE](NOTICE).

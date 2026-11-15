@@ -25,3 +25,14 @@ Mithril's NOTICE reads:
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+fuzz/oracle/oracle-internals.patch is a patch to mithril-stm 0.13.0
+(Mithril, Copyright 2022 Input Output (Hong Kong) Ltd., Apache License 2.0)
+that exposes crate-private functions to the test-only differential-fuzzing
+oracle; the oracle links the unmodified verification code of mithril-stm
+0.13.0 and mithril-common 0.8.3.
+
+internal/mithril/chain/timestamp.go is a port of chrono 0.4.45's relaxed
+RFC 3339 parser and timestamp_nanos_opt (https://github.com/chronotope/chrono,
+Copyright 2014 Kang Seonghoon and contributors, dual-licensed under the
+Apache License, Version 2.0, and the MIT license), translated to Go.
