@@ -1,0 +1,84 @@
+SPDX-License-Identifier: Apache-2.0
+
+Additive patch to mithril-stm 0.13.0 (crates.io; byte-identical to
+mithril-stm/src at IntersectMBO/mithril release 2642.0, commit
+e85df3ddc52b528c7b9ddbdddf1941fec6d5f348). Copyright 2022 Input Output
+(Hong Kong) Ltd., Apache-2.0. Modifications: a new `oracle-internals`
+feature exposing the crate-private lottery, dense-mapping and batch-path
+checks to the differential oracle. No verification code changes.
+Apply with `patch -p1` inside the unpacked crate.
+
+diff -ruN a/mithril-stm-0.13.0/Cargo.toml b/mithril-stm-0.13.0/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -59,6 +59,7 @@
+ 
+ [features]
+ benchmark-internals = []
++oracle-internals = []
+ default = ["num-integer-backend"]
+ num-integer-backend = [
+     "dep:num-bigint",
+diff -ruN a/mithril-stm-0.13.0/src/lib.rs b/mithril-stm-0.13.0/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -135,3 +135,6 @@
+     #[cfg(feature = "snark")]
+     type SnarkHash = MidnightPoseidonDigest;
+ }
++
++#[cfg(feature = "oracle-internals")]
++pub mod oracle_internals;
+diff -ruN a/mithril-stm-0.13.0/src/oracle_internals.rs b/mithril-stm-0.13.0/src/oracle_internals.rs
+--- a/src/oracle_internals.rs
++++ b/src/oracle_internals.rs
+@@ -0,0 +1,25 @@
++//! Test-only re-exports of crate-private verification steps for a differential oracle.
++use crate::membership_commitment::{MerkleBatchPath, MerkleTreeBatchCommitment, MerkleTreeConcatenationLeaf};
++pub use crate::signature_scheme::{BlsSignature, BlsVerificationKey};
++use crate::{MembershipDigest, MithrilMembershipDigest, PhiFValue, Stake, StmResult, VerificationKeyForConcatenation};
++
++pub type ConcatHash = <MithrilMembershipDigest as MembershipDigest>::ConcatenationHash;
++
++pub fn is_lottery_won(phi_f: PhiFValue, ev: [u8; 64], stake: Stake, total_stake: Stake) -> StmResult<bool> {
++    crate::proof_system::is_lottery_won(phi_f, ev, stake, total_stake)
++}
++
++pub fn evaluate_dense_mapping(sigma: &BlsSignature, msgp: &[u8], index: u64) -> [u8; 64] {
++    sigma.evaluate_dense_mapping(msgp, index)
++}
++
++pub fn verify_batch_path(
++    root: Vec<u8>,
++    nr_leaves: usize,
++    leaves: &[(VerificationKeyForConcatenation, Stake)],
++    path: &MerkleBatchPath<ConcatHash>,
++) -> StmResult<()> {
++    let c = MerkleTreeBatchCommitment::<ConcatHash, MerkleTreeConcatenationLeaf>::new(root, nr_leaves);
++    let l: Vec<_> = leaves.iter().map(|(v, s)| MerkleTreeConcatenationLeaf(*v, *s)).collect();
++    c.verify_leaves_membership_from_batch_path(&l, path)
++}
+diff -ruN a/mithril-stm-0.13.0/src/proof_system/concatenation/mod.rs b/mithril-stm-0.13.0/src/proof_system/concatenation/mod.rs
+--- a/src/proof_system/concatenation/mod.rs
++++ b/src/proof_system/concatenation/mod.rs
+@@ -7,7 +7,7 @@
+ 
+ pub use aggregate_key::AggregateVerificationKeyForConcatenation;
+ pub use clerk::ConcatenationClerk;
+-pub(super) use eligibility::is_lottery_won;
++pub(crate) use eligibility::is_lottery_won;
+ pub use proof::ConcatenationProof;
+ pub(crate) use signer::ConcatenationProofSigner;
+ pub(crate) use single_signature::SingleSignatureForConcatenation;
+diff -ruN a/mithril-stm-0.13.0/src/proof_system/mod.rs b/mithril-stm-0.13.0/src/proof_system/mod.rs
+--- a/src/proof_system/mod.rs
++++ b/src/proof_system/mod.rs
+@@ -56,6 +56,8 @@
+     AggregateVerificationKeyForConcatenation, ConcatenationClerk, ConcatenationProof,
+ };
+ pub(crate) use concatenation::{ConcatenationProofSigner, SingleSignatureForConcatenation};
++#[cfg(feature = "oracle-internals")]
++pub(crate) use concatenation::is_lottery_won;
+ 
+ #[cfg(feature = "snark")]
+ pub use halo2_snark::{

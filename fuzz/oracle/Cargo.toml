@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Differential-fuzzing oracle: answers questions about mithril-stm 0.13.0
+# and mithril-common 0.8.3 (Mithril release 2642.0) so the Go port's tests
+# can compare against them. Test tooling only; never linked into mithril2pq.
+
+[package]
+name = "mithril-oracle"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "=1.0.104"
+async-trait = "=0.1.92"
+ed25519-dalek = "=2.2.0"
+hex = "=0.4.3"
+# Feature set of mithril-client: num-integer backend, no snark, no rug.
+mithril-common = { version = "=0.8.3", default-features = false, features = ["num-integer-backend"] }
+mithril-stm = { version = "=0.13.0", default-features = false, features = ["num-integer-backend", "oracle-internals"] }
+rand_chacha = "=0.3.1"
+rand_core = { version = "=0.6.4", features = ["std"] }
+serde = "=1.0.229"
+# Same version and features as the release workspace: no float_roundtrip,
+# so phi_f parses exactly as mithril-client parses it.
+serde_json = { version = "=1.0.151", features = ["raw_value"] }
+slog = "=2.7.0"
+
+# build.sh unpacks the crates.io mithril-stm 0.13.0 here and applies
+# oracle-internals.patch; mithril-common resolves to the same patched copy.
+[patch.crates-io]
+mithril-stm = { path = "vendor/mithril-stm-0.13.0" }
+
+[profile.release]
+debug = false
+# The oracle reports Rust panics as answers, so they must unwind.
+panic = "unwind"
