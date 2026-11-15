@@ -81,6 +81,10 @@ func compareLeaves(a, b Leaf) int {
 // Close orders the parties and builds their Merkle tree. The total stake
 // must be non-zero and fit in 64 bits.
 func (r *KeyRegistration) Close() (*ClosedKeyRegistration, error) {
+	return r.closeWithHash(merkleHash)
+}
+
+func (r *KeyRegistration) closeWithHash(hash hashFunc) (*ClosedKeyRegistration, error) {
 	var total uint64
 	for _, e := range r.entries {
 		var carry uint64
@@ -94,7 +98,7 @@ func (r *KeyRegistration) Close() (*ClosedKeyRegistration, error) {
 	}
 	entries := slices.Clone(r.entries)
 	slices.SortFunc(entries, compareLeaves)
-	tree, err := NewMerkleTree(entries)
+	tree, err := newMerkleTree(entries, hash)
 	if err != nil {
 		return nil, err
 	}

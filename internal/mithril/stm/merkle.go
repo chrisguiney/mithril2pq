@@ -33,13 +33,23 @@ func (l Leaf) bytes() []byte {
 	return binary.BigEndian.AppendUint64(b, l.Stake)
 }
 
-func merkleHash(parts ...[]byte) []byte {
-	h, _ := blake2b.New256(nil)
-	for _, p := range parts {
-		h.Write(p)
+// hashFunc hashes the concatenation of its arguments.
+type hashFunc func(parts ...[]byte) []byte
+
+func blake2bHash(size int) hashFunc {
+	return func(parts ...[]byte) []byte {
+		h, _ := blake2b.New(size, nil)
+		for _, p := range parts {
+			h.Write(p)
+		}
+		return h.Sum(nil)
 	}
-	return h.Sum(nil)
 }
+
+// merkleHash is Mithril's concatenation tree hash, BLAKE2b with a 32-byte
+// output (not a truncated BLAKE2b-512). Only the size benchmark uses
+// another.
+var merkleHash = blake2bHash(32)
 
 // emptyNode fills a missing child: H(0x00).
 var emptyNode = merkleHash([]byte{0})
@@ -70,6 +80,10 @@ type MerkleTree struct {
 
 // NewMerkleTree builds the tree over leaves, in the given order.
 func NewMerkleTree(leaves []Leaf) (*MerkleTree, error) {
+	return newMerkleTree(leaves, merkleHash)
+}
+
+func newMerkleTree(leaves []Leaf, hash hashFunc) (*MerkleTree, error) {
 	n := uint64(len(leaves))
 	if n == 0 {
 		return nil, errors.New("stm: Merkle tree needs at least one leaf")
@@ -78,18 +92,19 @@ func NewMerkleTree(leaves []Leaf) (*MerkleTree, error) {
 	numNodes := n + np2 - 1
 	nodes := make([][]byte, numNodes)
 	for i, l := range leaves {
-		nodes[np2-1+uint64(i)] = merkleHash(l.bytes())
+		nodes[np2-1+uint64(i)] = hash(l.bytes())
 	}
 	for i := int64(np2) - 2; i >= 0; i-- {
 		left, right := uint64(2*i+1), uint64(2*i+2)
-		l, r := emptyNode, emptyNode
+		empty := hash([]byte{0})
+		l, r := empty, empty
 		if left < numNodes {
 			l = nodes[left]
 		}
 		if right < numNodes {
 			r = nodes[right]
 		}
-		nodes[i] = merkleHash(l, r)
+		nodes[i] = hash(l, r)
 	}
 	return &MerkleTree{nodes: nodes, leaves: n}, nil
 }
