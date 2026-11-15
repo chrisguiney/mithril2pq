@@ -19,28 +19,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 )
-
-// byteArray decodes a JSON array of integers 0..255.
-type byteArray []byte
-
-func (b *byteArray) UnmarshalJSON(data []byte) error {
-	var ints []json.Number
-	if err := json.Unmarshal(data, &ints); err != nil {
-		return fmt.Errorf("stm: want an array of bytes: %w", err)
-	}
-	out := make([]byte, len(ints))
-	for i, n := range ints {
-		v, err := strconv.ParseUint(string(n), 10, 8)
-		if err != nil {
-			return fmt.Errorf("stm: byte %d is %s", i, n)
-		}
-		out[i] = byte(v)
-	}
-	*b = out
-	return nil
-}
 
 func appendBytes(w *bytes.Buffer, b []byte) {
 	w.WriteByte('[')
@@ -64,40 +45,144 @@ func appendU64s(w *bytes.Buffer, xs []uint64) {
 	w.WriteByte(']')
 }
 
-func decodeStrict(data []byte, v any) error {
+// The decoders below mirror serde_json's derived Deserialize for these
+// types, which encoding/json does not: keys match exactly (no case
+// folding), a repeated key is an error, every field is required, and
+// unknown keys are skipped. Arrays must be arrays, not null.
+
+// decodeObject reads one JSON object, passing each known key's raw value to
+// its handler, and fails unless every known key appeared exactly once.
+func decodeObject(data []byte, fields map[string]func(json.RawMessage) error) error {
 	d := json.NewDecoder(bytes.NewReader(data))
-	d.UseNumber()
-	if err := d.Decode(v); err != nil {
+	if tok, err := d.Token(); err != nil || tok != json.Delim('{') {
+		return errors.New("want a JSON object")
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		key := tok.(string)
+		if seen[key] {
+			return fmt.Errorf("duplicate key %q", key)
+		}
+		seen[key] = true
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return err
+		}
+		if f, ok := fields[key]; ok {
+			if err := f(raw); err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
+	if _, err := d.Token(); err != nil {
 		return err
 	}
-	if d.More() {
-		return errors.New("stm: trailing data after JSON value")
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("trailing data after JSON value")
+	}
+	for k := range fields {
+		if !seen[k] {
+			return fmt.Errorf("missing key %q", k)
+		}
 	}
 	return nil
 }
 
-type avkJSON struct {
-	MTCommitment struct {
-		Root     byteArray       `json:"root"`
-		NrLeaves uint64          `json:"nr_leaves"`
-		Hasher   json.RawMessage `json:"hasher"`
-	} `json:"mt_commitment"`
-	TotalStake uint64 `json:"total_stake"`
+// decodeArray reads a JSON array (not null) of raw elements.
+func decodeArray(data []byte) ([]json.RawMessage, error) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil, errors.New("want an array, got null")
+	}
+	var out []json.RawMessage
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []json.RawMessage{}
+	}
+	return out, nil
+}
+
+func decodeU64(data []byte) (uint64, error) {
+	return strconv.ParseUint(string(bytes.TrimSpace(data)), 10, 64)
+}
+
+func decodeU64s(data []byte) ([]uint64, error) {
+	elems, err := decodeArray(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uint64, len(elems))
+	for i, e := range elems {
+		if out[i], err = decodeU64(e); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// decodeBytes reads a JSON array of integers 0..255.
+func decodeBytes(data []byte) ([]byte, error) {
+	elems, err := decodeArray(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(elems))
+	for i, e := range elems {
+		v, err := strconv.ParseUint(string(bytes.TrimSpace(e)), 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("byte %d is %s", i, e)
+		}
+		out[i] = byte(v)
+	}
+	return out, nil
+}
+
+func decodeNull(data json.RawMessage) error {
+	if !bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("must be null")
+	}
+	return nil
+}
+
+// decodeTuple reads a fixed-length JSON array.
+func decodeTuple(data []byte, n int) ([]json.RawMessage, error) {
+	elems, err := decodeArray(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(elems) != n {
+		return nil, fmt.Errorf("want %d elements, got %d", n, len(elems))
+	}
+	return elems, nil
 }
 
 // UnmarshalJSON decodes {"mt_commitment":{"root":[..],"nr_leaves":n,"hasher":null},"total_stake":n}.
 func (a *AggregateVerificationKey) UnmarshalJSON(data []byte) error {
-	var j avkJSON
-	if err := decodeStrict(data, &j); err != nil {
+	var out AggregateVerificationKey
+	err := decodeObject(data, map[string]func(json.RawMessage) error{
+		"mt_commitment": func(raw json.RawMessage) error {
+			return decodeObject(raw, map[string]func(json.RawMessage) error{
+				"root": func(raw json.RawMessage) (err error) {
+					if out.Root, err = decodeBytes(raw); err == nil && len(out.Root) != 32 {
+						err = fmt.Errorf("root is %d bytes", len(out.Root))
+					}
+					return err
+				},
+				"nr_leaves": func(raw json.RawMessage) (err error) { out.NrLeaves, err = decodeU64(raw); return err },
+				"hasher":    decodeNull,
+			})
+		},
+		"total_stake": func(raw json.RawMessage) (err error) { out.TotalStake, err = decodeU64(raw); return err },
+	})
+	if err != nil {
 		return fmt.Errorf("stm: aggregate verification key: %w", err)
 	}
-	if string(j.MTCommitment.Hasher) != "null" {
-		return errors.New(`stm: aggregate verification key: "hasher" must be null`)
-	}
-	if len(j.MTCommitment.Root) != 32 {
-		return fmt.Errorf("stm: aggregate verification key root is %d bytes", len(j.MTCommitment.Root))
-	}
-	*a = AggregateVerificationKey{Root: j.MTCommitment.Root, NrLeaves: j.MTCommitment.NrLeaves, TotalStake: j.TotalStake}
+	*a = out
 	return nil
 }
 
@@ -114,69 +199,90 @@ func (a *AggregateVerificationKey) MarshalJSON() ([]byte, error) {
 	return w.Bytes(), nil
 }
 
-type singleSigJSON struct {
-	Sigma       byteArray `json:"sigma"`
-	Indexes     []uint64  `json:"indexes"`
-	SignerIndex uint64    `json:"signer_index"`
+func decodeSingleSignature(data []byte) (SingleSignature, error) {
+	var s SingleSignature
+	err := decodeObject(data, map[string]func(json.RawMessage) error{
+		"sigma": func(raw json.RawMessage) error {
+			b, err := decodeBytes(raw)
+			if err != nil {
+				return err
+			}
+			s.Sigma, err = SignatureFromBytes(b)
+			return err
+		},
+		"indexes":      func(raw json.RawMessage) (err error) { s.Indexes, err = decodeU64s(raw); return err },
+		"signer_index": func(raw json.RawMessage) (err error) { s.SignerIndex, err = decodeU64(raw); return err },
+	})
+	return s, err
 }
 
-type proofJSON struct {
-	Signatures []json.RawMessage `json:"signatures"`
-	BatchProof struct {
-		Values  []byteArray     `json:"values"`
-		Indices []uint64        `json:"indices"`
-		Hasher  json.RawMessage `json:"hasher"`
-	} `json:"batch_proof"`
+func decodeRegistration(data []byte) (Leaf, error) {
+	t, err := decodeTuple(data, 2)
+	if err != nil {
+		return Leaf{}, err
+	}
+	b, err := decodeBytes(t[0])
+	if err != nil {
+		return Leaf{}, err
+	}
+	vk, err := VerificationKeyFromBytes(b)
+	if err != nil {
+		return Leaf{}, err
+	}
+	stake, err := decodeU64(t[1])
+	return Leaf{VK: vk, Stake: stake}, err
 }
 
 // UnmarshalJSON decodes the concatenation proof in its serde form:
 // {"signatures":[[sig, [vk, stake]], ...], "batch_proof":{...}}. Every
 // curve point is validated as it is decoded.
 func (p *ConcatenationProof) UnmarshalJSON(data []byte) error {
-	var j proofJSON
-	if err := decodeStrict(data, &j); err != nil {
+	var out ConcatenationProof
+	err := decodeObject(data, map[string]func(json.RawMessage) error{
+		"signatures": func(raw json.RawMessage) error {
+			elems, err := decodeArray(raw)
+			if err != nil {
+				return err
+			}
+			for i, e := range elems {
+				pair, err := decodeTuple(e, 2)
+				if err != nil {
+					return fmt.Errorf("entry %d: %w", i, err)
+				}
+				sig, err := decodeSingleSignature(pair[0])
+				if err != nil {
+					return fmt.Errorf("entry %d signature: %w", i, err)
+				}
+				party, err := decodeRegistration(pair[1])
+				if err != nil {
+					return fmt.Errorf("entry %d registration: %w", i, err)
+				}
+				out.Signatures = append(out.Signatures, SignedEntry{Sig: sig, Party: party})
+			}
+			return nil
+		},
+		"batch_proof": func(raw json.RawMessage) error {
+			return decodeObject(raw, map[string]func(json.RawMessage) error{
+				"values": func(raw json.RawMessage) error {
+					elems, err := decodeArray(raw)
+					if err != nil {
+						return err
+					}
+					out.BatchPath.Values = make([][]byte, len(elems))
+					for i, e := range elems {
+						if out.BatchPath.Values[i], err = decodeBytes(e); err != nil {
+							return err
+						}
+					}
+					return nil
+				},
+				"indices": func(raw json.RawMessage) (err error) { out.BatchPath.Indices, err = decodeU64s(raw); return err },
+				"hasher":  decodeNull,
+			})
+		},
+	})
+	if err != nil {
 		return fmt.Errorf("stm: multi-signature: %w", err)
-	}
-	if string(j.BatchProof.Hasher) != "null" {
-		return errors.New(`stm: multi-signature: batch proof "hasher" must be null`)
-	}
-	out := ConcatenationProof{BatchPath: BatchPath{Indices: j.BatchProof.Indices}}
-	for _, v := range j.BatchProof.Values {
-		out.BatchPath.Values = append(out.BatchPath.Values, v)
-	}
-	for i, raw := range j.Signatures {
-		var pair []json.RawMessage
-		if err := decodeStrict(raw, &pair); err != nil || len(pair) != 2 {
-			return fmt.Errorf("stm: multi-signature entry %d: want [signature, registration]", i)
-		}
-		var s singleSigJSON
-		if err := decodeStrict(pair[0], &s); err != nil {
-			return fmt.Errorf("stm: multi-signature entry %d signature: %w", i, err)
-		}
-		var reg []json.RawMessage
-		if err := decodeStrict(pair[1], &reg); err != nil || len(reg) != 2 {
-			return fmt.Errorf("stm: multi-signature entry %d: want registration [vk, stake]", i)
-		}
-		var vkb byteArray
-		var stake uint64
-		if err := decodeStrict(reg[0], &vkb); err != nil {
-			return fmt.Errorf("stm: multi-signature entry %d key: %w", i, err)
-		}
-		if err := decodeStrict(reg[1], &stake); err != nil {
-			return fmt.Errorf("stm: multi-signature entry %d stake: %w", i, err)
-		}
-		sigma, err := SignatureFromBytes(s.Sigma)
-		if err != nil {
-			return fmt.Errorf("stm: multi-signature entry %d: %w", i, err)
-		}
-		vk, err := VerificationKeyFromBytes(vkb)
-		if err != nil {
-			return fmt.Errorf("stm: multi-signature entry %d: %w", i, err)
-		}
-		out.Signatures = append(out.Signatures, SignedEntry{
-			Sig:   SingleSignature{Sigma: sigma, Indexes: s.Indexes, SignerIndex: s.SignerIndex},
-			Party: Leaf{VK: vk, Stake: stake},
-		})
 	}
 	*p = out
 	return nil
