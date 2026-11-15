@@ -161,18 +161,25 @@ func VerifyBatchPath(root []byte, nrLeaves uint64, leaves []Leaf, path BatchPath
 	if !slices.IsSorted(path.Indices) {
 		return ErrBatchPathInvalid
 	}
+	// Mithril's checked arithmetic: a leaf count of zero passes (its next
+	// power of two is 1), and np2 + nr_leaves or np2 + index reaching
+	// 2^64 is an error even where subtracting 1 would bring it back.
 	np2, ok := nextPowerOfTwo(nrLeaves)
-	if !ok || nrLeaves == 0 {
+	if !ok {
 		return ErrBatchPathInvalid
 	}
-	nrNodes := np2 + nrLeaves - 1
+	sum, carry := bits.Add64(np2, nrLeaves, 0)
+	if carry != 0 {
+		return ErrBatchPathInvalid
+	}
+	nrNodes := sum - 1
 	oi := make([]uint64, len(path.Indices))
 	for i, x := range path.Indices {
-		v := np2 - 1 + x
-		if v < x { // overflow
+		v, carry := bits.Add64(np2, x, 0)
+		if carry != 0 {
 			return ErrBatchPathInvalid
 		}
-		oi[i] = v
+		oi[i] = v - 1
 	}
 	hashes := make([][]byte, len(leaves))
 	for i, l := range leaves {

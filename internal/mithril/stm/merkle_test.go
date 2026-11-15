@@ -98,3 +98,37 @@ func TestBatchPathRejects(t *testing.T) {
 		}
 	}
 }
+
+// TestBatchPathLeafCountArithmetic follows Mithril's index arithmetic,
+// which does not reject a leaf count of zero: next_power_of_two(0) is 1, so
+// a one-leaf path checks out against nr_leaves 0 as it does against 1. It
+// rejects (checked arithmetic) where np2 + nr_leaves or np2 + index
+// overflows.
+func TestBatchPathLeafCountArithmetic(t *testing.T) {
+	leaves := testLeaves(t, 1)
+	tree, err := NewMerkleTree(leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := tree.BatchPath([]uint64{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyBatchPath(tree.Root(), 0, leaves, path); err != nil {
+		t.Errorf("nr_leaves 0: %v, Mithril accepts", err)
+	}
+	for _, tc := range []struct {
+		nrLeaves uint64
+		index    uint64
+	}{
+		{1 << 63, 0},           // np2 + nr_leaves = 2^64
+		{1, ^uint64(0)},        // np2 + index = 2^64
+		{(1 << 63) + 1, 0},     // no next power of two
+		{3, (1 << 64) - 4 + 1}, // 4 + index = 2^64 + 1
+	} {
+		p := BatchPath{Values: [][]byte{make([]byte, 32)}, Indices: []uint64{tc.index}}
+		if err := VerifyBatchPath(tree.Root(), tc.nrLeaves, leaves, p); !errors.Is(err, ErrBatchPathInvalid) {
+			t.Errorf("nr_leaves %d index %d: %v, want ErrBatchPathInvalid", tc.nrLeaves, tc.index, err)
+		}
+	}
+}
