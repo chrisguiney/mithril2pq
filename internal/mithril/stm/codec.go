@@ -47,8 +47,8 @@ func appendU64s(w *bytes.Buffer, xs []uint64) {
 
 // The decoders below mirror serde_json's derived Deserialize for these
 // types, which encoding/json does not: keys match exactly (no case
-// folding), a repeated key is an error, every field is required, and
-// unknown keys are skipped. Arrays must be arrays, not null.
+// folding), a repeated field is an error, every field is required, and
+// unknown keys are skipped, repeated or not. Arrays must be arrays, not null.
 
 // decodeObject reads one JSON object, passing each known key's raw value to
 // its handler, and fails unless every known key appeared exactly once.
@@ -64,18 +64,22 @@ func decodeObject(data []byte, fields map[string]func(json.RawMessage) error) er
 			return err
 		}
 		key := tok.(string)
-		if seen[key] {
-			return fmt.Errorf("duplicate key %q", key)
-		}
-		seen[key] = true
 		var raw json.RawMessage
 		if err := d.Decode(&raw); err != nil {
 			return err
 		}
-		if f, ok := fields[key]; ok {
-			if err := f(raw); err != nil {
-				return fmt.Errorf("%s: %w", key, err)
-			}
+		f, ok := fields[key]
+		if !ok {
+			// serde skips unknown keys without tracking them, so a
+			// repeated unknown key is not an error.
+			continue
+		}
+		if seen[key] {
+			return fmt.Errorf("duplicate key %q", key)
+		}
+		seen[key] = true
+		if err := f(raw); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
 		}
 	}
 	if _, err := d.Token(); err != nil {

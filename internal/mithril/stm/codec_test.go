@@ -9,7 +9,8 @@ import (
 )
 
 // serde_json's derived impls for these types match keys exactly, reject a
-// repeated key and require every field; they ignore unknown keys. The
+// repeated field and require every field; they ignore unknown keys, even
+// repeated ones. The
 // decoders must do the same, rather than encoding/json's case folding,
 // last-wins duplicates and zero defaults.
 func TestCodecStrictness(t *testing.T) {
@@ -34,6 +35,7 @@ func TestCodecStrictness(t *testing.T) {
 		{"avk missing field", true, once(avk, `,"hasher":null`, ``), false},
 		{"avk missing total_stake", true, avk[:strings.Index(avk, `,"total_stake"`)] + "}", false},
 		{"avk unknown key ignored", true, once(avk, `{"mt_commitment"`, `{"extra":[1,{"a":2}],"mt_commitment"`), true},
+		{"avk repeated unknown key ignored", true, once(avk, `{"mt_commitment"`, `{"x":1,"x":2,"Hasher":0,"Hasher":0,"mt_commitment"`), true},
 		{"proof as served", false, proof, true},
 		{"proof key case", false, once(proof, `"sigma"`, `"Sigma"`), false},
 		{"proof duplicate key", false, once(proof, `"signer_index":`, `"signer_index":0,"signer_index":`), false},
@@ -42,6 +44,7 @@ func TestCodecStrictness(t *testing.T) {
 		{"proof null indexes", false, once(proof, `"indexes":[`, `"indexes":null,"y":[`), false},
 		{"proof duplicate batch key", false, once(proof, `"indices":`, `"indices":[],"indices":`), false},
 		{"proof unknown key ignored", false, once(proof, `"batch_proof":{`, `"batch_proof":{"z":null,`), true},
+		{"proof repeated unknown key ignored", false, once(proof, `"signer_index":`, `"Hasher":1,"Hasher":1,"signer_index":`), true},
 		{"proof trailing data", false, proof + "{}", false},
 	} {
 		var err error
