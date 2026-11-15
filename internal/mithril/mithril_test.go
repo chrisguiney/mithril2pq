@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/chrisguiney/mithril2pq/internal/mithril/chain"
 )
 
 func TestProtocolMessageHashMatchesCertificate(t *testing.T) {
@@ -15,7 +17,12 @@ func TestProtocolMessageHashMatchesCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cert Certificate
+	// The fixture keeps only the fields this test needs, so it is not a
+	// complete certificate message.
+	var cert struct {
+		SignedMessage   string                `json:"signed_message"`
+		ProtocolMessage chain.ProtocolMessage `json:"protocol_message"`
+	}
 	if err := json.Unmarshal(b, &cert); err != nil {
 		t.Fatal(err)
 	}

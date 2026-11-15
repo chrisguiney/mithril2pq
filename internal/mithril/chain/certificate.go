@@ -14,6 +14,7 @@
 package chain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -21,9 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/chrisguiney/mithril2pq/internal/mithril/stm"
 )
@@ -177,19 +178,6 @@ func (p ProtocolParameters) STM() stm.Parameters {
 	return stm.Parameters{M: p.M, K: p.K, PhiF: p.PhiF}
 }
 
-// unixNanos is chrono's timestamp_nanos_opt().unwrap_or_default(): zero
-// outside the range an i64 of nanoseconds can hold.
-func unixNanos(s string) (int64, error) {
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return 0, fmt.Errorf("certificate timestamp %q: %w", s, err)
-	}
-	if t.Before(time.Unix(0, math.MinInt64)) || t.After(time.Unix(0, math.MaxInt64)) {
-		return 0, nil
-	}
-	return t.UnixNano(), nil
-}
-
 // Hash is SHA-256 of the network, version, parameter hash (hex text), both
 // timestamps (i64 nanoseconds big-endian) and, per signer in order, the hex
 // text of SHA-256(party id || stake big-endian).
@@ -223,51 +211,66 @@ func (m *Metadata) Hash() (string, error) {
 
 // signedEntityFeed returns the bytes the certificate hash takes from the
 // signed entity type: its beacon fields as u64 big-endian, preceded for
-// CardanoBlocksTransactions by its type id as u16 big-endian.
+// CardanoBlocksTransactions by its type id as u16 big-endian. It accepts
+// exactly what serde reads as a known SignedEntityType: one variant key,
+// tuple variants as arrays of their exact length, and the CardanoDatabase
+// beacon as an object or a two-element array.
 func signedEntityFeed(raw json.RawMessage) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil || len(m) != 1 {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	n, err := parseNode(d)
+	if err != nil || n.kind != '{' || len(n.keys) != 1 {
 		return nil, fmt.Errorf("signed entity type %s is not a single-variant object", raw)
 	}
-	var out []byte
-	put := func(vs ...uint64) {
-		for _, v := range vs {
-			out = binary.BigEndian.AppendUint64(out, v)
+	k, v := n.keys[0], n.items[0]
+	u64s := func(want int) ([]uint64, error) {
+		items := []*node{v}
+		if want != 1 || v.kind == '[' {
+			if v.kind != '[' || len(v.items) != want {
+				return nil, fmt.Errorf("signed entity type %s: want %d values", k, want)
+			}
+			items = v.items
 		}
+		out := make([]uint64, len(items))
+		for i, it := range items {
+			x, err := strconv.ParseUint(it.text, 10, 64)
+			if it.kind != 'n' || err != nil {
+				return nil, fmt.Errorf("signed entity type %s: %q is not a u64", k, it.text)
+			}
+			out[i] = x
+		}
+		return out, nil
 	}
-	for k, v := range m {
-		switch k {
-		case "MithrilStakeDistribution", "CardanoStakeDistribution":
-			var e uint64
-			if err := json.Unmarshal(v, &e); err != nil {
-				return nil, fmt.Errorf("signed entity type %s: %w", k, err)
-			}
-			put(e)
-		case "CardanoDatabase":
-			var b struct {
-				Epoch               *uint64 `json:"epoch"`
-				ImmutableFileNumber *uint64 `json:"immutable_file_number"`
-			}
-			if err := json.Unmarshal(v, &b); err != nil || b.Epoch == nil || b.ImmutableFileNumber == nil {
-				return nil, fmt.Errorf("signed entity type %s: bad beacon %s", k, v)
-			}
-			put(*b.Epoch, *b.ImmutableFileNumber)
-		case "CardanoTransactions":
-			var a [2]uint64
-			if err := json.Unmarshal(v, &a); err != nil {
-				return nil, fmt.Errorf("signed entity type %s: %w", k, err)
-			}
-			put(a[:]...)
-		case "CardanoBlocksTransactions":
-			var a [3]uint64
-			if err := json.Unmarshal(v, &a); err != nil {
-				return nil, fmt.Errorf("signed entity type %s: %w", k, err)
-			}
-			out = binary.BigEndian.AppendUint16(out, 5) // ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS
-			put(a[:]...)
-		default:
-			return nil, fmt.Errorf("unknown signed entity type %q", k)
+	var vals []uint64
+	var out []byte
+	switch k {
+	case "MithrilStakeDistribution", "CardanoStakeDistribution":
+		if v.kind == '[' {
+			return nil, fmt.Errorf("signed entity type %s: want a number", k)
 		}
+		vals, err = u64s(1)
+	case "CardanoDatabase":
+		if v.kind == '{' {
+			if err = checkObject(v, beaconFields); err == nil {
+				v = &node{kind: '[', items: []*node{v.items[slices.Index(v.keys, "epoch")], v.items[slices.Index(v.keys, "immutable_file_number")]}}
+			}
+		}
+		if err == nil {
+			vals, err = u64s(2)
+		}
+	case "CardanoTransactions":
+		vals, err = u64s(2)
+	case "CardanoBlocksTransactions":
+		vals, err = u64s(3)
+		out = binary.BigEndian.AppendUint16(out, 5) // ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS
+	default:
+		return nil, fmt.Errorf("unknown signed entity type %q", k)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range vals {
+		out = binary.BigEndian.AppendUint64(out, x)
 	}
 	return out, nil
 }
@@ -334,6 +337,9 @@ func decode(c *Certificate) (*decoded, error) {
 			return nil, fmt.Errorf("certificate %s: %w", c.Hash, err)
 		}
 		return d, nil
+	}
+	if _, err := signedEntityFeed(c.SignedEntityType); err != nil {
+		return nil, fmt.Errorf("certificate %s: %w", c.Hash, err)
 	}
 	var p stm.ConcatenationProof
 	if err := DecodeJSONHex(c.MultiSignature, &p); err != nil {
