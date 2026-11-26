@@ -41,6 +41,9 @@ type config struct {
 	compression string
 	lastChunk   int64 // -1: the snapshot's last immutable file
 
+	immutableDir string // a node's ImmutableDB directory, instead of an aggregator
+	networkMagic int64  // with immutableDir: the network's protocol magic; -1 when unset
+
 	genesisKeyArg string           // -genesis-vkey as given
 	genesisKey    chain.GenesisKey // resolved by validate
 }
@@ -53,8 +56,9 @@ type runner struct {
 	cfg      config
 	client   *mithril.Client
 	artifact mithril.Artifact
-	digests  map[string]string
+	digests  map[string]string // certified, or with immutableDir the digests of the manifest's last chunk
 	network  string
+	last     int64 // the last chunk this run may convert: the snapshot's, or the last finished one in immutableDir
 	ds       *dataset.Dir
 	st       *stats
 	prog     *progress
@@ -66,19 +70,29 @@ type runner struct {
 
 func run(ctx context.Context, stopCh <-chan struct{}, cfg config, st *stats, prog *progress) error {
 	r := &runner{cfg: cfg, st: st, prog: prog, mem: memory.NewGoAllocator()}
-	agg, presetNet, err := mithril.ResolveAggregator(cfg.archive)
-	if err != nil {
-		return err
+	var presetNet string
+	if cfg.immutableDir == "" {
+		var agg string
+		var err error
+		if agg, presetNet, err = mithril.ResolveAggregator(cfg.archive); err != nil {
+			return err
+		}
+		r.client = mithril.NewClient(agg)
 	}
-	r.client = mithril.NewClient(agg)
 
+	var err error
 	r.ds, err = dataset.Open(cfg.out)
 	if err != nil {
 		return err
 	}
 	defer r.ds.Close()
 
-	if err := r.loadSnapshot(ctx, presetNet); err != nil {
+	if cfg.immutableDir != "" {
+		err = r.loadLocal()
+	} else {
+		err = r.loadSnapshot(ctx, presetNet)
+	}
+	if err != nil {
 		return err
 	}
 	start, end, err := r.plan()
@@ -116,6 +130,7 @@ func (r *runner) loadSnapshot(ctx context.Context, presetNet string) error {
 	}
 	r.artifact = a
 	r.network = a.Network
+	r.last = int64(a.Beacon.ImmutableFileNumber)
 	if presetNet != "" && a.Network != presetNet {
 		return fmt.Errorf("the %s aggregator served a snapshot for network %q", presetNet, a.Network)
 	}
@@ -158,7 +173,7 @@ func (r *runner) loadSnapshot(ctx context.Context, presetNet string) error {
 // plan works out which chunks to apply and checks the output directory
 // belongs to the same chain.
 func (r *runner) plan() (start, end int64, err error) {
-	end = int64(r.artifact.Beacon.ImmutableFileNumber)
+	end = r.last
 	if r.cfg.lastChunk >= 0 && r.cfg.lastChunk < end {
 		end = r.cfg.lastChunk
 	}
@@ -170,7 +185,7 @@ func (r *runner) plan() (start, end int64, err error) {
 		return 0, 0, fmt.Errorf("%s was written with schema version %d; this mithril2pq writes version %d. Convert into a new directory", r.cfg.out, m.SchemaVersion, schema.Version)
 	}
 	if m.Network != r.network {
-		return 0, 0, fmt.Errorf("%s holds %s data; the snapshot is for %s", r.cfg.out, m.Network, r.network)
+		return 0, 0, fmt.Errorf("%s holds %s data; the source is for %s", r.cfg.out, m.Network, r.network)
 	}
 	if m.LastChunk >= 0 {
 		for name, want := range m.LastChunkDigests {
@@ -178,8 +193,8 @@ func (r *runner) plan() (start, end int64, err error) {
 				return 0, 0, fmt.Errorf("%s was built from a different chain: the snapshot certifies %s as %s, the output was built from %s", r.cfg.out, name, got, want)
 			}
 		}
-		if uint64(m.LastChunk) > r.artifact.Beacon.ImmutableFileNumber {
-			return 0, 0, fmt.Errorf("%s already holds chunks through %d, past this snapshot's last immutable file %d", r.cfg.out, m.LastChunk, r.artifact.Beacon.ImmutableFileNumber)
+		if m.LastChunk > r.last {
+			return 0, 0, fmt.Errorf("%s already holds chunks through %d, past the source's last immutable file %d", r.cfg.out, m.LastChunk, r.last)
 		}
 	}
 	return m.LastChunk + 1, end, nil
@@ -267,12 +282,14 @@ func removeCachePartials(cacheDir string) {
 // ---- pipeline ----
 
 type fetched struct {
-	data []byte // in memory, when there is no cache
-	path string // cached archive
-	err  error
+	data  []byte       // in memory, when there is no cache
+	files *chunk.Files // read from a local ImmutableDB
+	path  string       // cached archive
+	err   error
 }
 
 type decoded struct {
+	digests   map[string]string   // file name to SHA-256, as recorded in the manifest
 	recs      []arrow.RecordBatch // by table ID; nil for none and for deduplicated tables
 	scripts   []schema.Row
 	natives   []schema.Row
@@ -386,6 +403,14 @@ func (r *runner) pipeline(ctx context.Context, stopCh <-chan struct{}, start, en
 }
 
 func (r *runner) fetch(ctx context.Context, n uint64) fetched {
+	if r.cfg.immutableDir != "" {
+		files, err := chunk.ReadDir(r.cfg.immutableDir, n)
+		if err != nil {
+			return fetched{err: err}
+		}
+		r.st.chunksDownloaded.Add(1)
+		return fetched{files: &files}
+	}
 	urls, err := r.artifact.ImmutableURLs(n)
 	if err != nil {
 		return fetched{err: err}
@@ -461,6 +486,22 @@ func (r *runner) chunkDigests(n uint64) chunk.Digests {
 	}
 }
 
+// digestMap names each digest after its file, the manifest's key.
+func digestMap(n uint64, d chunk.Digests) map[string]string {
+	return map[string]string{
+		chunk.FileName(n, "chunk"):     d.Chunk,
+		chunk.FileName(n, "primary"):   d.Primary,
+		chunk.FileName(n, "secondary"): d.Secondary,
+	}
+}
+
+func (r *runner) readSource(n uint64, f fetched) (chunk.Files, error) {
+	if f.files != nil {
+		return *f.files, nil
+	}
+	return r.readArchive(n, f)
+}
+
 func (r *runner) readArchive(n uint64, f fetched) (chunk.Files, error) {
 	if f.path == "" {
 		return chunk.ReadArchive(bytes.NewReader(f.data), n)
@@ -477,8 +518,8 @@ func (r *runner) decode(ctx context.Context, n uint64, f fetched) decoded {
 	if f.err != nil {
 		return decoded{err: f.err}
 	}
-	files, err := r.readArchive(n, f)
-	if err == nil {
+	files, err := r.readSource(n, f)
+	if err == nil && f.files == nil {
 		err = files.Verify(r.chunkDigests(n))
 	}
 	if err != nil && f.path != "" {
@@ -506,6 +547,7 @@ func (r *runner) decode(ctx context.Context, n uint64, f fetched) decoded {
 	}
 	rows, stats := extract.Chunk(n, blocks)
 	d := decoded{stats: stats, recs: make([]arrow.RecordBatch, len(schema.Tables))}
+	d.digests = digestMap(n, files.Sum())
 	if len(blocks) > 0 {
 		last := blocks[len(blocks)-1]
 		d.lastHash = append([]byte(nil), last.Hash[:]...)
@@ -545,7 +587,9 @@ func (r *runner) write(ctx context.Context, jobs []*job, decodeAhead chan struct
 		m = &cp
 	}
 	m.Network = r.network
-	m.Aggregator = r.client.Aggregator
+	if r.client != nil {
+		m.Aggregator = r.client.Aggregator
+	}
 	m.Compression = r.cfg.compression
 
 	opts := dataset.Options{
@@ -600,10 +644,14 @@ func (r *runner) write(ctx context.Context, jobs []*job, decodeAhead chan struct
 			}
 		}
 		m.Tables = tables
-		m.Snapshot = dataset.SnapshotInfo{
-			Hash: r.artifact.Hash, Epoch: r.artifact.Beacon.Epoch,
-			ImmutableFileNumber: r.artifact.Beacon.ImmutableFileNumber,
-			MerkleRoot:          r.artifact.MerkleRoot, CertificateHash: r.artifact.CertificateHash,
+		if r.client != nil {
+			m.Snapshot = dataset.SnapshotInfo{
+				Hash: r.artifact.Hash, Epoch: r.artifact.Beacon.Epoch,
+				ImmutableFileNumber: r.artifact.Beacon.ImmutableFileNumber,
+				MerkleRoot:          r.artifact.MerkleRoot, CertificateHash: r.artifact.CertificateHash,
+			}
+		} else {
+			m.Snapshot = dataset.SnapshotInfo{}
 		}
 		committed := *m
 		if err := r.ds.Commit(&committed); err != nil {
@@ -655,11 +703,7 @@ loop:
 		}
 		pending = true
 		m.LastChunk = int64(j.n)
-		m.LastChunkDigests = map[string]string{}
-		for _, ext := range []string{"chunk", "primary", "secondary"} {
-			name := chunk.FileName(j.n, ext)
-			m.LastChunkDigests[name] = r.digests[name]
-		}
+		m.LastChunkDigests = d.digests
 		if d.lastHash != nil {
 			prevHash = d.lastHash
 			m.LastBlockHash = hex.EncodeToString(d.lastHash)

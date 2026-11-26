@@ -1,5 +1,6 @@
 // mithril2pq downloads a Cardano database snapshot from a Mithril
-// aggregator and writes its blocks as a set of flat Parquet tables.
+// aggregator, or reads the finished chunks of a node's own ImmutableDB, and
+// writes the blocks as a set of flat Parquet tables.
 //
 // Each immutable file is verified against the snapshot's certified digest
 // list, every block's CRC32 against the chunk's secondary index, and every
@@ -34,7 +35,9 @@ func main() {
 func realMain() int {
 	cfg := config{}
 	fileSize := sizeFlag{n: 128_000_000}
-	flag.StringVar(&cfg.archive, "mithril-archive", "mainnet", "`network or URL`: mainnet, preprod, preview, or a Mithril aggregator URL")
+	flag.StringVar(&cfg.archive, "mithril-archive", "", "`network or URL`: mainnet (the default), preprod, preview, or a Mithril aggregator URL")
+	flag.StringVar(&cfg.immutableDir, "immutable-dir", "", "convert the finished chunks of a node's ImmutableDB `directory` (db/immutable) instead of a Mithril snapshot; needs -network-magic, excludes -mithril-archive")
+	flag.Int64Var(&cfg.networkMagic, "network-magic", -1, "with -immutable-dir: the network's protocol `magic` (mainnet 764824073, preprod 1, preview 2); the output directory refuses data from another network")
 	flag.StringVar(&cfg.snapshot, "snapshot", "", "snapshot `hash` to use (default: the aggregator's latest)")
 	flag.StringVar(&cfg.out, "out", "", "output `directory` for the Parquet tables (required)")
 	flag.StringVar(&cfg.cacheDir, "cache-dir", "", "`directory` to keep downloaded archives in, compressed (default: no cache)")
@@ -124,6 +127,15 @@ func validate(cfg *config) error {
 	}
 	if _, ok := dataset.Compressions[cfg.compression]; !ok {
 		return fmt.Errorf("-compression %q is not one of zstd, snappy, gzip, none", cfg.compression)
+	}
+	if cfg.immutableDir != "" {
+		return validateLocal(cfg)
+	}
+	if cfg.networkMagic >= 0 {
+		return errors.New("-network-magic only applies with -immutable-dir")
+	}
+	if cfg.archive == "" {
+		cfg.archive = "mainnet"
 	}
 	_, network, err := mithril.ResolveAggregator(cfg.archive)
 	if err != nil {

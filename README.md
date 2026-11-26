@@ -109,7 +109,9 @@ mithril2pq -out DIR [options]
 | Option | Default | Description |
 |---|---|---|
 | `-out DIR` | (required) | Output directory for the Parquet tables. Created, with its parents, if missing. If it already holds a mithril2pq dataset, the run updates it with the chunks it does not hold yet. |
-| `-mithril-archive NET\|URL` | `mainnet` | Which Mithril aggregator to use: `mainnet`, `preprod`, `preview` (the official release/pre-release aggregators) or the base URL of any aggregator, e.g. `https://aggregator.example.org/aggregator`. |
+| `-mithril-archive NET\|URL` | `mainnet` | Which Mithril aggregator to use: `mainnet`, `preprod`, `preview` (the official release/pre-release aggregators) or the base URL of any aggregator, e.g. `https://aggregator.example.org/aggregator`. Excluded by `-immutable-dir`. |
+| `-immutable-dir DIR` | none | Convert the finished chunks of a node's own ImmutableDB (`db/immutable`) instead of a Mithril snapshot. Needs `-network-magic`; cannot be combined with `-mithril-archive`, `-snapshot`, `-cache-dir` or `-genesis-vkey`. See [Local ImmutableDB](#local-immutabledb). |
+| `-network-magic N` | none | With `-immutable-dir`: the network's protocol magic (mainnet `764824073`, preprod `1`, preview `2`, a devnet's own value otherwise). The output directory refuses data from another network. |
 | `-snapshot HASH` | latest | Convert this Cardano database snapshot (artifact hash) instead of the aggregator's latest. Useful to reproduce a run exactly. |
 | `-cache-dir DIR` | none | Keep downloaded archives here, still compressed (`NNNNN.tar.zst`, one per immutable file), and reuse them on later runs. Created if missing. A cache directory belongs to one network: a marker file makes a run against another network refuse it. Without a cache, archives are held only in memory. |
 | `-file-size SIZE` | `128MB` | Target size of each Parquet file. Accepts `300MB`, `3GB`, `1.5GiB`, `2k`, or a plain byte count. `KB`/`MB`/`GB`/`TB` (and `K`/`M`/`G`/`T`) are decimal; `KiB`/`MiB`/`GiB`/`TiB` are binary. A file can exceed the target by about one row group (row groups are at most 64 MB). |
@@ -185,6 +187,34 @@ A run refuses an output directory from another network, another chain, or a
 different schema version. After a schema version change (a new mithril2pq
 release that changes tables or columns), convert into a new directory; with
 `-cache-dir`, that reuses the downloaded archives.
+
+## Local ImmutableDB
+
+`-immutable-dir` converts a running (or stopped) node's database directly,
+with no aggregator, no download and no cache. It reads `NNNNN.chunk`,
+`.primary` and `.secondary` from the directory, and writes the same tables.
+
+```sh
+mithril2pq -immutable-dir /data/node/db/immutable -network-magic 764824073 -out /data/mainnet-pq
+```
+
+- **Finished chunks only.** The node appends to the highest-numbered chunk,
+  so chunk N is read only once chunk N+1 exists. The newest chunk is skipped
+  until the node moves on, and a run over a directory with one chunk converts
+  nothing.
+- **Computed digests.** Nothing certifies the files, so the manifest records
+  the SHA-256 of the last converted chunk's files as computed, and a later run
+  recomputes them. The same continuity check as for snapshots applies: a
+  directory whose last converted chunk changed, or whose next chunk does not
+  continue from the last block written, is refused.
+- **Network.** A node's database does not name its network, so `-network-magic`
+  does. The magic of mainnet, preprod and preview maps to those names, and
+  datasets converted from a Mithril snapshot and from a local database of the
+  same network can be updated from either source. Any other magic is recorded
+  as `magic-N`. A run refuses an output directory from another network.
+- **Not verified.** Chunks are read as the node wrote them: block checksums are
+  checked against the secondary index, but nothing proves the node's database
+  is the canonical chain. Use a Mithril snapshot for that.
 
 ## Verification
 
