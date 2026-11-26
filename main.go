@@ -46,6 +46,7 @@ func realMain() int {
 	flag.IntVar(&cfg.buffer, "buffer", 0, "without -cache-dir, the most downloaded `archives` held in memory ahead of the writer (default 2x -concurrency)")
 	flag.IntVar(&cfg.workers, "workers", runtime.GOMAXPROCS(0), "concurrent chunk `decoders`")
 	flag.DurationVar(&cfg.checkpoint, "checkpoint", 30*time.Minute, "commit progress at least this often (`duration`; 0 commits only at the end)")
+	flag.DurationVar(&cfg.watch, "watch", 0, "after converting, rerun the update every `duration` (e.g. 30s) until SIGINT or SIGTERM, which finishes the current chunk, commits and exits 0; 0 runs once")
 	flag.StringVar(&cfg.compression, "compression", "zstd", "Parquet `codec`: zstd, snappy, gzip or none")
 	flag.Int64Var(&cfg.lastChunk, "last-chunk", -1, "stop after this immutable file `number` (default: the snapshot's last)")
 	flag.StringVar(&cfg.genesisKeyArg, "genesis-vkey", "", "Mithril genesis verification `key or file` (genesis.vkey format or 64 hex digits); required with an aggregator URL, overrides the pinned key of mainnet, preprod and preview")
@@ -64,14 +65,13 @@ func realMain() int {
 	}
 
 	tty := term.IsTerminal(int(os.Stderr.Fd()))
-	st := &stats{start: time.Now()}
-	prog := newProgress(st, os.Stderr, tty)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stopCh := make(chan struct{})
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
 		<-sigs
 		close(stopCh)
@@ -79,13 +79,31 @@ func realMain() int {
 		// Second signal: abort without committing. Committed data is
 		// untouched; temporary files are removed here, and anything a
 		// crash could leave is removed on the next run.
-		prog.finish()
 		fmt.Fprintln(os.Stderr, "mithril2pq: aborted; removing temporary files")
 		removeTemps(cfg.out)
 		removeCachePartials(cfg.cacheDir)
 		os.Exit(130)
 	}()
 
+	once := func() error { return convert(ctx, stopCh, cfg, tty) }
+	if cfg.watch == 0 {
+		return exitCode(once())
+	}
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "mithril2pq: "+format+"\n", args...)
+	}
+	// A failed iteration is reported by convert; watch only retries it.
+	if err := watch(stopCh, cfg.watch, once, logf); err != nil {
+		return 1
+	}
+	return 0
+}
+
+// convert runs one conversion pass with its own progress display and
+// reports its outcome on stderr.
+func convert(ctx context.Context, stopCh <-chan struct{}, cfg config, tty bool) error {
+	st := &stats{start: time.Now()}
+	prog := newProgress(st, os.Stderr, tty)
 	prog.run()
 	err := run(ctx, stopCh, cfg, st, prog)
 	prog.print()
@@ -93,15 +111,24 @@ func realMain() int {
 	summary(st)
 	switch {
 	case err == nil:
-		return 0
 	case errors.Is(err, errStopped):
 		fmt.Fprintln(os.Stderr, "mithril2pq: stopped; progress is committed and the next run resumes from it")
-		return 130
 	default:
 		fmt.Fprintf(os.Stderr, "mithril2pq: %s\n", explain(err))
-		if !errors.Is(err, errStopped) && st.chunksWritten.Load() > 0 {
+		if st.chunksWritten.Load() > 0 {
 			fmt.Fprintln(os.Stderr, "mithril2pq: chunks written before the error are committed; rerun to continue")
 		}
+	}
+	return err
+}
+
+func exitCode(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, errStopped):
+		return 130
+	default:
 		return 1
 	}
 }
@@ -109,6 +136,9 @@ func realMain() int {
 func validate(cfg *config) error {
 	if cfg.out == "" {
 		return errors.New("-out is required")
+	}
+	if cfg.watch < 0 {
+		return errors.New("-watch must not be negative")
 	}
 	if cfg.fileSize < 1_000_000 {
 		return fmt.Errorf("-file-size %s is too small; use at least 1MB", formatBytes(float64(cfg.fileSize)))

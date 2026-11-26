@@ -38,6 +38,7 @@ type config struct {
 	buffer      int
 	workers     int
 	checkpoint  time.Duration
+	watch       time.Duration // 0: convert once and exit
 	compression string
 	lastChunk   int64 // -1: the snapshot's last immutable file
 
@@ -182,15 +183,15 @@ func (r *runner) plan() (start, end int64, err error) {
 		return 0, end, nil
 	}
 	if m.SchemaVersion != schema.Version {
-		return 0, 0, fmt.Errorf("%s was written with schema version %d; this mithril2pq writes version %d. Convert into a new directory", r.cfg.out, m.SchemaVersion, schema.Version)
+		return 0, 0, configError(fmt.Errorf("%s was written with schema version %d; this mithril2pq writes version %d. Convert into a new directory", r.cfg.out, m.SchemaVersion, schema.Version))
 	}
 	if m.Network != r.network {
-		return 0, 0, fmt.Errorf("%s holds %s data; the source is for %s", r.cfg.out, m.Network, r.network)
+		return 0, 0, configError(fmt.Errorf("%s holds %s data; the source is for %s", r.cfg.out, m.Network, r.network))
 	}
 	if m.LastChunk >= 0 {
 		for name, want := range m.LastChunkDigests {
 			if got, ok := r.digests[name]; ok && got != want {
-				return 0, 0, fmt.Errorf("%s was built from a different chain: the snapshot certifies %s as %s, the output was built from %s", r.cfg.out, name, got, want)
+				return 0, 0, configError(fmt.Errorf("%s was built from a different chain: the snapshot certifies %s as %s, the output was built from %s", r.cfg.out, name, got, want))
 			}
 		}
 		if m.LastChunk > r.last {

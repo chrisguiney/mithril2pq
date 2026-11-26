@@ -120,6 +120,7 @@ mithril2pq -out DIR [options]
 | `-workers N` | CPU count | Concurrent chunk decoders. |
 | `-checkpoint DURATION` | `30m` | Commit progress (finish the open files and update the manifest) at least this often, e.g. `10m`, `2h`. `0` commits only at the end. An interrupted run resumes from the last commit. |
 | `-compression CODEC` | `zstd` | Parquet compression: `zstd`, `snappy`, `gzip` or `none`. All are readable by pyarrow, fastparquet and DuckDB. |
+| `-watch DURATION` | `0` (run once) | After the first conversion, rerun the update every `DURATION` (e.g. `30s`) until `SIGINT` or `SIGTERM`. A signal finishes the current chunk, commits and exits `0`. Works with `-immutable-dir` and `-mithril-archive`. A failed pass (network, I/O) is logged and retried with a doubling backoff capped at 10 minutes; a configuration error (the output directory holds another network, another schema version, or a different chain) exits `1` at once. See [Watching](#watching). |
 | `-last-chunk N` | snapshot's last | Stop after immutable file `N`. Converts a prefix of the chain, e.g. `-last-chunk 207` for mainnet's Byron era; a later run without it continues from there. |
 | `-genesis-vkey KEY\|FILE` | pinned | Mithril genesis verification key the certificate chain must end at, as a key or a file holding one (Mithril's `genesis.vkey` JSON-hex format, or 64 hex digits). Required with an aggregator URL; overrides the built-in key of `mainnet`, `preprod` and `preview`. See [Verification](#verification). |
 
@@ -187,6 +188,21 @@ A run refuses an output directory from another network, another chain, or a
 different schema version. After a schema version change (a new mithril2pq
 release that changes tables or columns), convert into a new directory; with
 `-cache-dir`, that reuses the downloaded archives.
+
+## Watching
+
+`-watch 30s` keeps the process running and updates the output every 30
+seconds, so a container with no shell (the distroless image) can follow a
+node's ImmutableDB without a wrapper loop:
+
+```sh
+mithril2pq -watch 30s -immutable-dir /data/node/db/immutable -network-magic 764824073 -out /data/mainnet-pq
+```
+
+Each pass converts the chunks the output does not hold yet; with nothing new
+it does nothing. `SIGTERM` or `SIGINT` stops after the current chunk is
+committed and exits `0`; a second signal aborts without committing. With
+`-mithril-archive`, each pass asks the aggregator for its latest snapshot.
 
 ## Local ImmutableDB
 
